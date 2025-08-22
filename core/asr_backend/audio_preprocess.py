@@ -31,20 +31,73 @@ def convert_video_to_audio(video_file: str):
         rprint(f"[green]🎬➡️🎵 Converted <{video_file}> to <{_RAW_AUDIO_FILE}> with FFmpeg\n[/green]")
 
 def get_audio_duration(audio_file: str) -> float:
-    """Get the duration of an audio file using ffmpeg."""
-    cmd = ['ffmpeg', '-i', audio_file]
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    _, stderr = process.communicate()
-    output = stderr.decode('utf-8', errors='ignore')
-    
+    """Get the duration of an audio file using multiple methods for robustness."""
+    # Method 1: Try using pydub first (faster and more reliable)
     try:
-        duration_str = [line for line in output.split('\n') if 'Duration' in line][0]
-        duration_parts = duration_str.split('Duration: ')[1].split(',')[0].split(':')
-        duration = float(duration_parts[0])*3600 + float(duration_parts[1])*60 + float(duration_parts[2])
+        audio = AudioSegment.from_file(audio_file)
+        duration = len(audio) / 1000.0  # Convert milliseconds to seconds
+        if duration > 0:
+            return duration
     except Exception as e:
-        print(f"[red]❌ Error: Failed to get audio duration: {e}[/red]")
-        duration = 0
-    return duration
+        rprint(f"[yellow]⚠️ Warning: pydub failed to get duration: {e}[/yellow]")
+    
+    # Method 2: Try using mediainfo
+    try:
+        info = mediainfo(audio_file)
+        if 'duration' in info and info['duration']:
+            duration = float(info['duration'])
+            if duration > 0:
+                return duration
+    except Exception as e:
+        rprint(f"[yellow]⚠️ Warning: mediainfo failed to get duration: {e}[/yellow]")
+    
+    # Method 3: Fallback to ffmpeg with improved error handling
+    try:
+        cmd = ['ffmpeg', '-i', audio_file]
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        _, stderr = process.communicate()
+        output = stderr.decode('utf-8', errors='ignore')
+        
+        # Find lines containing 'Duration'
+        duration_lines = [line for line in output.split('\n') if 'Duration' in line]
+        if not duration_lines:
+            raise ValueError("No Duration information found in ffmpeg output")
+            
+        duration_str = duration_lines[0]
+        # Extract duration string more safely
+        if 'Duration: ' not in duration_str:
+            raise ValueError("Invalid Duration format in ffmpeg output")
+            
+        time_part = duration_str.split('Duration: ')[1].split(',')[0]
+        duration_parts = time_part.split(':')
+        
+        if len(duration_parts) != 3:
+            raise ValueError(f"Invalid time format: {time_part}")
+            
+        duration = float(duration_parts[0])*3600 + float(duration_parts[1])*60 + float(duration_parts[2])
+        if duration > 0:
+            return duration
+            
+    except Exception as e:
+        rprint(f"[red]❌ Error: ffmpeg failed to get audio duration: {e}[/red]")
+    
+    # Method 4: Check if file exists and has size
+    try:
+        if not os.path.exists(audio_file):
+            rprint(f"[red]❌ Error: Audio file does not exist: {audio_file}[/red]")
+            return 0
+            
+        file_size = os.path.getsize(audio_file)
+        if file_size == 0:
+            rprint(f"[red]❌ Error: Audio file is empty: {audio_file}[/red]")
+            return 0
+            
+        rprint(f"[yellow]⚠️ Warning: Could not determine duration for {audio_file}, file exists but duration detection failed[/yellow]")
+        
+    except Exception as e:
+        rprint(f"[red]❌ Error: Failed to check file existence: {e}[/red]")
+    
+    return 0
 
 def split_audio(audio_file: str, target_len: float = 30*60, win: float = 60) -> List[Tuple[float, float]]:
     ## 在 [target_len-win, target_len+win] 区间内用 pydub 检测静默，切分音频

@@ -44,9 +44,18 @@ def siliconflow_fish_tts(text, save_path, mode="preset", voice_id=None, ref_audi
 
     response = requests.post(API_URL_SPEECH, json=payload, headers=headers)
     if response.status_code == 200:
+        # 检查响应内容类型和大小
+        content_type = response.headers.get('content-type', '')
+        if 'audio' not in content_type.lower() and len(response.content) < 1000:
+            raise Exception(f"Invalid audio response: {response.text[:200]}")
+            
         wav_file_path = Path(save_path).with_suffix('.wav')
         wav_file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(wav_file_path, 'wb') as f: f.write(response.content)
+        
+        # 验证文件大小
+        if wav_file_path.stat().st_size < 1000:
+            raise Exception(f"Generated audio file too small: {wav_file_path.stat().st_size} bytes")
         
         if check_duration:
             duration = get_audio_duration(wav_file_path)
@@ -54,13 +63,12 @@ def siliconflow_fish_tts(text, save_path, mode="preset", voice_id=None, ref_audi
             
         rprint(f"[green]Successfully generated audio file: {wav_file_path}")
         return True
-        
-    error_msg = response.json()
-    rprint(f"[red]Failed to generate audio | HTTP {response.status_code} (Attempt {attempt + 1}/{max_retries})")
-    rprint(f"[red]Text: {text}")
-    rprint(f"[red]Error details: {error_msg}")
-            
-    return False
+    else:
+        try:
+            error_msg = response.json()
+        except:
+            error_msg = response.text
+        raise Exception(f"SiliconFlow Fish TTS API error: {response.status_code} - {error_msg}")
 
 @except_handler("Failed to create custom voice")
 def create_custom_voice(audio_path, text, custom_name=None):

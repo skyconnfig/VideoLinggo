@@ -5,6 +5,9 @@ import subprocess
 import torch
 import whisperx
 import librosa
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from rich import print as rprint
 from core.utils import *
 
@@ -13,27 +16,60 @@ MODEL_DIR = load_key("model_dir")
 
 @except_handler("failed to check hf mirror", default_return=None)
 def check_hf_mirror():
-    mirrors = {'Official': 'huggingface.co', 'Mirror': 'hf-mirror.com'}
-    fastest_url = f"https://{mirrors['Official']}"
-    best_time = float('inf')
-    rprint("[cyan]🔍 Checking HuggingFace mirrors...[/cyan]")
-    for name, domain in mirrors.items():
-        if os.name == 'nt':
-            cmd = ['ping', '-n', '1', '-w', '3000', domain]
-        else:
-            cmd = ['ping', '-c', '1', '-W', '3', domain]
-        start = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        response_time = time.time() - start
-        if result.returncode == 0:
-            if response_time < best_time:
-                best_time = response_time
-                fastest_url = f"https://{domain}"
-            rprint(f"[green]✓ {name}:[/green] {response_time:.2f}s")
-    if best_time == float('inf'):
-        rprint("[yellow]⚠️ All mirrors failed, using default[/yellow]")
-    rprint(f"[cyan]🚀 Selected mirror:[/cyan] {fastest_url} ({best_time:.2f}s)")
-    return fastest_url
+    # 优先使用国内镜像源以提高下载速度和稳定性
+    mirror_url = "https://hf-mirror.com"
+    rprint("[cyan]🔍 Using HuggingFace China mirror for better download speed...[/cyan]")
+    rprint(f"[cyan]🚀 Selected mirror:[/cyan] {mirror_url}")
+    return mirror_url
+
+def setup_robust_session():
+    """设置带有重试机制的HTTP会话"""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=5,  # 总重试次数
+        backoff_factor=2,  # 退避因子
+        status_forcelist=[429, 500, 502, 503, 504],  # 需要重试的HTTP状态码
+        allowed_methods=["HEAD", "GET", "OPTIONS"]  # 允许重试的HTTP方法
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+def download_with_retry(url, local_path, max_retries=3):
+    """带重试机制的文件下载"""
+    session = setup_robust_session()
+    
+    for attempt in range(max_retries):
+        try:
+            rprint(f"[cyan]📥 Downloading attempt {attempt + 1}/{max_retries}...[/cyan]")
+            response = session.get(url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            with open(local_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            rprint(f"[green]✅ Download completed successfully![/green]")
+            return True
+            
+        except (requests.exceptions.ChunkedEncodingError, 
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            rprint(f"[yellow]⚠️ Download attempt {attempt + 1} failed: {str(e)}[/yellow]")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 指数退避
+                rprint(f"[cyan]⏳ Waiting {wait_time}s before retry...[/cyan]")
+                time.sleep(wait_time)
+            else:
+                rprint(f"[red]❌ All download attempts failed![/red]")
+                return False
+        except Exception as e:
+            rprint(f"[red]❌ Unexpected error during download: {str(e)}[/red]")
+            return False
+    
+    return False
 
 @except_handler("WhisperX processing error:")
 def transcribe_audio(raw_audio_file, vocal_audio_file, start, end):
@@ -70,7 +106,41 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end):
     asr_options = {"temperatures": [0],"initial_prompt": "",}
     whisper_language = None if 'auto' in WHISPER_LANGUAGE else WHISPER_LANGUAGE
     rprint("[bold yellow] You can ignore warning of `Model was trained with torch 1.10.0+cu102, yours is 2.0.0+cu118...`[/bold yellow]")
-    model = whisperx.load_model(model_name, device, compute_type=compute_type, language=whisper_language, vad_options=vad_options, asr_options=asr_options, download_root=MODEL_DIR)
+    
+    # 增强模型加载的重试机制
+    model = None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            rprint(f"[cyan]🔄 Model loading attempt {attempt + 1}/{max_retries}...[/cyan]")
+            model = whisperx.load_model(model_name, device, compute_type=compute_type, language=whisper_language, vad_options=vad_options, asr_options=asr_options, download_root=MODEL_DIR)
+            rprint(f"[green]✅ Model loaded successfully![/green]")
+            break
+        except (Exception) as e:
+            rprint(f"[yellow]⚠️ Model loading attempt {attempt + 1} failed: {str(e)}[/yellow]")
+            if "ChunkedEncodingError" in str(e) or "IncompleteRead" in str(e) or "Connection broken" in str(e):
+                if attempt < max_retries - 1:
+                    wait_time = 5 * (attempt + 1)  # 递增等待时间
+                    rprint(f"[cyan]⏳ Network error detected, waiting {wait_time}s before retry...[/cyan]")
+                    time.sleep(wait_time)
+                    # 清理可能损坏的缓存文件
+                    try:
+                        import glob
+                        incomplete_files = glob.glob(os.path.join(MODEL_DIR, "**", "*.incomplete"), recursive=True)
+                        for file in incomplete_files:
+                            os.remove(file)
+                            rprint(f"[cyan]🗑️ Removed incomplete file: {file}[/cyan]")
+                    except:
+                        pass
+                else:
+                    rprint(f"[red]❌ All model loading attempts failed due to network issues![/red]")
+                    raise e
+            else:
+                rprint(f"[red]❌ Model loading failed with non-network error: {str(e)}[/red]")
+                raise e
+    
+    if model is None:
+        raise Exception("Failed to load WhisperX model after multiple attempts")
 
     def load_audio_segment(audio_file, start, end):
         audio, _ = librosa.load(audio_file, sr=16000, offset=start, duration=end - start, mono=True)

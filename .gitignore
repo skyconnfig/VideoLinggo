@@ -167,6 +167,25 @@ batch/tasks_setting.xlsx
 .DS_Store
 AllinOne.ipynb
 config.backup.yaml
+ffmpeg-*.zip
+ffmpeg-*-essentials_build/
+ollama-*.exe
+OllamaSetup.exe
+
+# GPT-SoVITS model files
+GPT-SoVITS-v2-*/
+
+# temporary files
+query
+test_*.py
+check_gpu.py
+*.bat
+推荐配置
+
+# IDE and development
+.trae/
+.cursor/
+.vscode/
 
 # runtime
 runtime/

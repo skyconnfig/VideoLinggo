@@ -25,8 +25,9 @@ target_language: '简体中文'
 demucs: true
 
 whisper:
-  # ["large-v3", "large-v3-turbo"]. Note: for zh model will force to use Belle/large-v3
-  model: 'large-v3'
+  # ["base", "small", "medium", "large-v3", "large-v3-turbo"]. Note: for zh model will force to use Belle/large-v3
+  # Using smaller model to reduce download failure risk
+  model: 'base'
   # Whisper specified recognition language ISO 639-1
   language: 'en'
   detected_language: 'en'
@@ -42,7 +43,8 @@ burn_subtitles: true
 
 ## ======================== Advanced Settings ======================== ##
 # *🔬 h264_nvenc GPU acceleration for ffmpeg, make sure your GPU supports it
-ffmpeg_gpu: false
+# 切换到CPU模式以避免CUDNN警告
+ffmpeg_gpu: false  # 禁用GPU加速编码，使用CPU模式
 
 # *Youtube settings
 youtube:
@@ -71,7 +73,7 @@ pause_before_translate: false
 
 ## ======================== Dubbing Settings ======================== ##
 # TTS selection [sf_fish_tts, openai_tts, gpt_sovits, azure_tts, fish_tts, edge_tts, custom_tts]
-tts_method: 'azure_tts'
+tts_method: 'edge_tts'
 
 # SiliconFlow FishTTS
 sf_fish_tts:

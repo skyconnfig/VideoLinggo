@@ -34,10 +34,35 @@ def align_subs(src_sub: str, tr_sub: str, src_part: str) -> Tuple[List[str], Lis
     align_prompt = get_align_prompt(src_sub, tr_sub, src_part)
     
     def valid_align(response_data):
+        # 添加调试日志
+        console.print(f"[yellow]🔍 调试信息 - qwen2响应数据: {response_data}[/yellow]")
+        
         if 'align' not in response_data:
             return {"status": "error", "message": "Missing required key: `align`"}
-        if len(response_data['align']) < 2:
-            return {"status": "error", "message": "Align does not contain more than 1 part as expected!"}
+        
+        align_data = response_data['align']
+        console.print(f"[yellow]🔍 调试信息 - align数组长度: {len(align_data)}[/yellow]")
+        console.print(f"[yellow]🔍 调试信息 - align数组内容: {align_data}[/yellow]")
+        
+        # 计算期望的部分数量
+        src_splits = src_part.split('\n')
+        expected_parts = len(src_splits)
+        console.print(f"[yellow]🔍 调试信息 - 期望的部分数量: {expected_parts}[/yellow]")
+        console.print(f"[yellow]🔍 调试信息 - 源文本分割: {src_splits}[/yellow]")
+        
+        # 修复验证逻辑：检查align数组长度是否与期望的部分数量匹配
+        if len(align_data) < expected_parts:
+            console.print(f"[red]❌ 对齐验证失败: align数组长度({len(align_data)}) < 期望部分数量({expected_parts})[/red]")
+            return {"status": "error", "message": f"Align contains {len(align_data)} parts but expected {expected_parts} parts!"}
+        
+        # 检查每个align项是否包含必要的键
+        for i, item in enumerate(align_data):
+            expected_key = f'target_part_{i+1}'
+            if expected_key not in item:
+                console.print(f"[red]❌ 对齐验证失败: 缺少键 {expected_key}[/red]")
+                return {"status": "error", "message": f"Missing required key: {expected_key} in align item {i+1}"}
+        
+        console.print(f"[green]✅ 对齐验证成功: 找到{len(align_data)}个有效的对齐部分[/green]")
         return {"status": "success", "message": "Align completed"}
     parsed = ask_gpt(align_prompt, resp_type='json', valid_def=valid_align, log_title='align_subs')
     align_data = parsed['align']
@@ -116,13 +141,25 @@ def split_for_sub_main():
         # 更新源数据继续下一轮分割
         src, trans = split_src, split_trans
 
-    # 确保二者有相同的长度，防止报错
-    if len(src) > len(remerged):
-        remerged += [None] * (len(src) - len(remerged))
-    elif len(remerged) > len(src):
-        src += [None] * (len(remerged) - len(src))
+    # 确保所有数组有相同的长度，防止报错
+    max_len = max(len(src), len(trans), len(remerged))
     
-    pd.DataFrame({'Source': split_src, 'Translation': split_trans}).to_excel(_5_SPLIT_SUB, index=False)
+    # 补齐src数组
+    if len(src) < max_len:
+        src += [None] * (max_len - len(src))
+    
+    # 补齐trans数组
+    if len(trans) < max_len:
+        trans += [None] * (max_len - len(trans))
+    
+    # 补齐remerged数组
+    if len(remerged) < max_len:
+        remerged += [None] * (max_len - len(remerged))
+    
+    # 添加长度验证日志
+    console.print(f"[green]✅ 数组长度验证: src={len(src)}, trans={len(trans)}, remerged={len(remerged)}[/green]")
+    
+    pd.DataFrame({'Source': src, 'Translation': trans}).to_excel(_5_SPLIT_SUB, index=False)
     pd.DataFrame({'Source': src, 'Translation': remerged}).to_excel(_5_REMERGED, index=False)
 
 if __name__ == '__main__':

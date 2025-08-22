@@ -5,8 +5,21 @@ from core import *
 
 # SET PATH
 current_dir = os.path.dirname(os.path.abspath(__file__))
+# 添加项目根目录到PATH
 os.environ['PATH'] += os.pathsep + current_dir
+
+# 自动配置项目本地FFmpeg路径
+local_ffmpeg_path = os.path.join(current_dir, "ffmpeg-7.1.1-essentials_build", "bin")
+if os.path.exists(local_ffmpeg_path):
+    # 将本地FFmpeg路径添加到环境变量PATH的开头（优先级最高）
+    current_path = os.environ.get('PATH', '')
+    if local_ffmpeg_path not in current_path:
+        os.environ['PATH'] = local_ffmpeg_path + os.pathsep + current_path
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# 强制使用CPU模式，避免CUDNN错误
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 st.set_page_config(page_title="VideoLingo", page_icon="docs/logo.svg")
 

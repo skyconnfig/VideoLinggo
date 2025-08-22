@@ -28,12 +28,21 @@ def openai_tts(text, save_path):
     response = requests.post(BASE_URL, headers=headers, data=payload)
     
     if response.status_code == 200:
+        # 检查响应内容类型和大小
+        content_type = response.headers.get('content-type', '')
+        if 'audio' not in content_type.lower() and len(response.content) < 1000:
+            raise Exception(f"Invalid audio response: {response.text[:200]}")
+            
         with open(speech_file_path, 'wb') as f:
             f.write(response.content)
+            
+        # 验证文件大小
+        if speech_file_path.stat().st_size < 1000:
+            raise Exception(f"Generated audio file too small: {speech_file_path.stat().st_size} bytes")
+            
         print(f"Audio saved to {speech_file_path}")
     else:
-        print(f"Error: {response.status_code}")
-        print(response.text)
+        raise Exception(f"OpenAI TTS API error: {response.status_code} - {response.text}")
 
 if __name__ == "__main__":
     openai_tts("Hi! Welcome to VideoLingo!", "test.wav")

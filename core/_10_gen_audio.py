@@ -28,22 +28,40 @@ def parse_df_srt_time(time_str: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(milliseconds) / 1000
 
 def adjust_audio_speed(input_file: str, output_file: str, speed_factor: float) -> None:
-    """Adjust audio speed and handle edge cases"""
-    # If the speed factor is close to 1, directly copy the file
+    """Adjust audio speed using ffmpeg with proper atempo range handling"""
     if abs(speed_factor - 1.0) < 0.001:
         shutil.copy2(input_file, output_file)
         return
+    
+    # FFmpeg atempo filter supports range 0.5-100.0
+    # For values outside this range, we need to chain multiple atempo filters or clamp the value
+    def build_atempo_filter(factor: float) -> str:
+        """Build atempo filter chain for speed factors outside normal range"""
+        if 0.5 <= factor <= 100.0:
+            return f'atempo={factor}'
         
-    atempo = speed_factor
-    cmd = ['ffmpeg', '-i', input_file, '-filter:a', f'atempo={atempo}', '-y', output_file]
+        # For extreme values, clamp to safe range and warn user
+        if factor < 0.5:
+            rprint(f"[yellow]⚠️ Speed factor {factor} too low, clamping to 0.5[/yellow]")
+            return 'atempo=0.5'
+        elif factor > 100.0:
+            rprint(f"[yellow]⚠️ Speed factor {factor} too high, clamping to 100.0[/yellow]")
+            return 'atempo=100.0'
+        
+        return f'atempo={factor}'
+    
+    atempo_filter = build_atempo_filter(speed_factor)
+    cmd = ['ffmpeg', '-i', input_file, '-filter:a', atempo_filter, '-y', output_file]
     input_duration = get_audio_duration(input_file)
     max_retries = 2
+    
     for attempt in range(max_retries):
         try:
-            subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+            result = subprocess.run(cmd, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
             output_duration = get_audio_duration(output_file)
             expected_duration = input_duration / speed_factor
             diff = output_duration - expected_duration
+            
             # If the output duration exceeds the expected duration, but the input audio is less than 3 seconds, and the error is within 0.1 seconds, truncate to the expected length
             if output_duration >= expected_duration * 1.02 and input_duration < 3 and diff <= 0.1:
                 audio = AudioSegment.from_wav(output_file)
@@ -54,13 +72,21 @@ def adjust_audio_speed(input_file: str, output_file: str, speed_factor: float) -
             elif output_duration >= expected_duration * 1.02:
                 raise Exception(f"Audio duration abnormal: input file={input_file}, output file={output_file}, speed factor={speed_factor}, input duration={input_duration:.2f}s, output duration={output_duration:.2f}s")
             return
+            
         except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.decode('utf-8') if e.stderr else 'Unknown error'
             if attempt < max_retries - 1:
                 rprint(f"[yellow]⚠️ Audio speed adjustment failed, retrying in 1s ({attempt + 1}/{max_retries})[/yellow]")
+                rprint(f"[yellow]Error details: {error_msg}[/yellow]")
                 time.sleep(1)
             else:
                 rprint(f"[red]❌ Audio speed adjustment failed, max retries reached ({max_retries})[/red]")
+                rprint(f"[red]Final error: {error_msg}[/red]")
+                rprint(f"[red]Command: {' '.join(cmd)}[/red]")
                 raise e
+        except Exception as e:
+            rprint(f"[red]❌ Unexpected error in audio speed adjustment: {str(e)}[/red]")
+            raise e
 
 def process_row(row: pd.Series, tasks_df: pd.DataFrame) -> Tuple[int, float]:
     """Helper function for processing single row data"""
@@ -116,25 +142,52 @@ def generate_tts_audio(tasks_df: pd.DataFrame) -> pd.DataFrame:
     return tasks_df
 
 def process_chunk(chunk_df: pd.DataFrame, accept: float, min_speed: float) -> tuple[float, bool]:
-    """Process audio chunk and calculate speed factor"""
+    """Process audio chunk and calculate speed factor with safety limits"""
     chunk_durs = chunk_df['real_dur'].sum()
     tol_durs = chunk_df['tol_dur'].sum()
     durations = tol_durs - chunk_df.iloc[-1]['tolerance']
     all_gaps = chunk_df['gap'].sum() - chunk_df.iloc[-1]['gap']
     
+    # 防止除零错误
+    if durations <= 0.1:
+        rprint(f"[yellow]⚠️ Warning: Very small duration value ({durations:.3f}s), using minimum safe value[/yellow]")
+        durations = 0.1
+    if tol_durs <= 0.1:
+        rprint(f"[yellow]⚠️ Warning: Very small tolerance duration value ({tol_durs:.3f}s), using minimum safe value[/yellow]")
+        tol_durs = 0.1
+    
     keep_gaps = True
     speed_var_error = 0.1
-
+    
+    # 计算速度因子前记录原始值用于日志
+    raw_speed_factor = 0
+    
     if (chunk_durs + all_gaps) / accept < durations:
-        speed_factor = max(min_speed, (chunk_durs + all_gaps) / (durations-speed_var_error))
+        raw_speed_factor = (chunk_durs + all_gaps) / (durations-speed_var_error)
+        speed_factor = max(min_speed, raw_speed_factor)
     elif chunk_durs / accept < durations:
-        speed_factor = max(min_speed, chunk_durs / (durations-speed_var_error))
+        raw_speed_factor = chunk_durs / (durations-speed_var_error)
+        speed_factor = max(min_speed, raw_speed_factor)
         keep_gaps = False
     elif (chunk_durs + all_gaps) / accept < tol_durs:
-        speed_factor = max(min_speed, (chunk_durs + all_gaps) / (tol_durs-speed_var_error))
+        raw_speed_factor = (chunk_durs + all_gaps) / (tol_durs-speed_var_error)
+        speed_factor = max(min_speed, raw_speed_factor)
     else:
-        speed_factor = chunk_durs / (tol_durs-speed_var_error)
+        raw_speed_factor = chunk_durs / (tol_durs-speed_var_error)
+        speed_factor = max(min_speed, raw_speed_factor)
         keep_gaps = False
+    
+    # 限制最大速度因子，防止FFmpeg atempo滤镜错误
+    MAX_SPEED_FACTOR = 100.0
+    if speed_factor > MAX_SPEED_FACTOR:
+        rprint(f"[yellow]⚠️ Calculated speed factor {speed_factor:.3f} exceeds maximum allowed value, clamping to {MAX_SPEED_FACTOR}[/yellow]")
+        rprint(f"[yellow]Original values: chunk_durs={chunk_durs:.3f}s, durations={durations:.3f}s, raw_factor={raw_speed_factor:.3f}[/yellow]")
+        speed_factor = MAX_SPEED_FACTOR
+    
+    # 记录异常高的速度因子
+    if speed_factor > 10.0:
+        rprint(f"[yellow]⚠️ High speed factor detected: {speed_factor:.3f}[/yellow]")
+        rprint(f"[yellow]Debug info: chunk_durs={chunk_durs:.3f}s, durations={durations:.3f}s, tol_durs={tol_durs:.3f}s, gaps={all_gaps:.3f}s[/yellow]")
         
     return round(speed_factor, 3), keep_gaps
 

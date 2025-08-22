@@ -47,10 +47,31 @@ def check_ffmpeg():
     from translations.translations import translate as t
     console = Console()
 
+    # 首先检查项目本地的FFmpeg
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    local_ffmpeg_path = os.path.join(current_dir, "ffmpeg-7.1.1-essentials_build", "bin")
+    local_ffmpeg_exe = os.path.join(local_ffmpeg_path, "ffmpeg.exe")
+    
+    # 如果本地FFmpeg存在，自动配置路径
+    if os.path.exists(local_ffmpeg_exe):
+        # 将本地FFmpeg路径添加到环境变量PATH的开头（优先级最高）
+        current_path = os.environ.get('PATH', '')
+        if local_ffmpeg_path not in current_path:
+            os.environ['PATH'] = local_ffmpeg_path + os.pathsep + current_path
+            console.print(Panel(t("✅ 已自动配置项目本地FFmpeg路径"), style="green"))
+        
+        # 验证本地FFmpeg是否可用
+        try:
+            subprocess.run([local_ffmpeg_exe, '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            console.print(Panel(t("✅ 项目本地FFmpeg配置成功并可正常使用"), style="green"))
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            console.print(Panel(t("⚠️ 项目本地FFmpeg存在但无法正常运行，尝试系统FFmpeg"), style="yellow"))
+    
+    # 如果本地FFmpeg不存在或不可用，检查系统FFmpeg
     try:
-        # Check if ffmpeg is installed
         subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        console.print(Panel(t("✅ FFmpeg is already installed"), style="green"))
+        console.print(Panel(t("✅ 系统FFmpeg可用"), style="green"))
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         system = platform.system()

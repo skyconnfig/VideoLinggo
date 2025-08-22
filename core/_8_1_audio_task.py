@@ -1,4 +1,5 @@
 import datetime
+import os
 import re
 import pandas as pd
 from rich.console import Console
@@ -51,6 +52,23 @@ def time_diff_seconds(t1, t2, base_date):
 
 def process_srt():
     """Process srt file, generate audio tasks"""
+    
+    # 检查必需的字幕文件是否存在
+    if not os.path.exists(TRANS_SUBS_FOR_AUDIO_FILE):
+        error_msg = f"❌ 缺少翻译字幕文件: {TRANS_SUBS_FOR_AUDIO_FILE}\n" \
+                   f"请确保已完成字幕处理步骤，该文件应在'生成时间轴和字幕'步骤中生成。\n" \
+                   f"如果问题持续存在，请检查 _6_gen_sub.align_timestamp_main() 函数是否正确执行。"
+        rprint(Panel(error_msg, title="文件缺失错误", border_style="red"))
+        raise FileNotFoundError(error_msg)
+    
+    if not os.path.exists(SRC_SUBS_FOR_AUDIO_FILE):
+        error_msg = f"❌ 缺少源语言字幕文件: {SRC_SUBS_FOR_AUDIO_FILE}\n" \
+                   f"请确保已完成字幕处理步骤。"
+        rprint(Panel(error_msg, title="文件缺失错误", border_style="red"))
+        raise FileNotFoundError(error_msg)
+    
+    rprint(Panel(f"✅ 找到字幕文件:\n- {TRANS_SUBS_FOR_AUDIO_FILE}\n- {SRC_SUBS_FOR_AUDIO_FILE}", 
+                title="文件检查", border_style="green"))
     
     with open(TRANS_SUBS_FOR_AUDIO_FILE, 'r', encoding='utf-8') as file:
         content = file.read()
