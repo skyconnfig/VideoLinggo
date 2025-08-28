@@ -48,7 +48,7 @@ def find_split_positions(original, modified):
 def split_sentence(sentence, num_parts, word_limit=20, index=-1, retry_attempt=0):
     """Split a long sentence using GPT and return the result as a string."""
     split_prompt = get_split_prompt(sentence, num_parts, word_limit)
-    def valid_split(response_data):
+    def valid_split(response_data, original_sentence=sentence):
         # 添加详细的响应数据日志
         console.print(f"[cyan]Debug: 收到的响应数据: {response_data}[/cyan]")
         console.print(f"[cyan]Debug: 响应数据类型: {type(response_data)}[/cyan]")
@@ -59,21 +59,38 @@ def split_sentence(sentence, num_parts, word_limit=20, index=-1, retry_attempt=0
             console.print(f"[red]Error: 响应数据不是字典格式: {type(response_data)}[/red]")
             return {"status": "error", "message": "Response data is not a dictionary"}
         
-        # 检查choice字段
-        if "choice" not in response_data:
-            console.print(f"[red]Error: 响应中缺少'choice'字段[/red]")
-            return {"status": "error", "message": "Missing required key: choice"}
+        # 动态查找可用的split字段
+        available_split_keys = [k for k in response_data.keys() if k.startswith('split') and k != 'split']
+        console.print(f"[cyan]Debug: 可用的split字段: {available_split_keys}[/cyan]")
         
-        choice = str(response_data["choice"])  # 确保choice是字符串
-        split_key = f'split{choice}'
+        # 确定要使用的split字段
+        split_key = None
+        choice = None
         
-        # 检查对应的split字段
-        if split_key not in response_data:
-            console.print(f"[red]Error: 响应中缺少'{split_key}'字段[/red]")
-            # 尝试查找其他可能的split字段
-            available_keys = [k for k in response_data.keys() if k.startswith('split')]
-            console.print(f"[yellow]Available split keys: {available_keys}[/yellow]")
-            return {"status": "error", "message": f"Missing required key: {split_key}"}
+        # 首先尝试使用choice字段
+        if "choice" in response_data:
+            choice = str(response_data["choice"]).strip()
+            console.print(f"[cyan]Debug: 检测到choice字段: '{choice}'[/cyan]")
+            
+            # 清理choice值，移除可能的额外文本
+            if choice and choice[0].isdigit():
+                choice = choice[0]  # 只取第一个数字
+            
+            potential_key = f'split{choice}'
+            if potential_key in response_data:
+                split_key = potential_key
+                console.print(f"[green]使用choice指定的字段: {split_key}[/green]")
+        
+        # 如果choice方法失败，尝试使用第一个可用的split字段
+        if not split_key and available_split_keys:
+            split_key = available_split_keys[0]
+            console.print(f"[yellow]choice字段无效，使用第一个可用的split字段: {split_key}[/yellow]")
+        
+        # 如果仍然没有找到split字段，返回错误
+        if not split_key:
+            console.print(f"[red]Error: 未找到任何有效的split字段[/red]")
+            console.print(f"[yellow]Available keys: {list(response_data.keys())}[/yellow]")
+            return {"status": "error", "message": "No valid split field found in response"}
         
         split_content = response_data[split_key]
         console.print(f"[cyan]Debug: 检查的分割内容: {repr(split_content)}[/cyan]")
@@ -161,31 +178,123 @@ def split_sentence(sentence, num_parts, word_limit=20, index=-1, retry_attempt=0
             console.print(f"[green]Found newline separators, converted to: {processed_content}[/green]")
         
         if not has_valid_split:
-            console.print(f"[red]Error: 分割内容中没有找到有效的分割标记[/red]")
-            console.print(f"[yellow]实际内容: {repr(split_content)}[/yellow]")
-            console.print(f"[yellow]支持的格式: [br]标记、<split_this_sentence>标签、<split_this_paragraph>标签、HTML标签、换行符[/yellow]")
-            # 尝试将原始内容作为单个段落处理，不进行分割
-            console.print(f"[yellow]Warning: 无法识别分割标记，将原始内容作为单个段落处理[/yellow]")
-            response_data[split_key] = split_content  # 保持原始内容
-            has_valid_split = True  # 标记为有效，避免错误
+            console.print(f"[yellow]Warning: 分割内容中没有找到标准分割标记，尝试智能分割[/yellow]")
+            console.print(f"[cyan]实际内容: {repr(split_content)}[/cyan]")
+            
+            # 智能分割逻辑：尝试根据标点符号、连词等进行分割
+            processed_content = split_content.strip()
+            
+            # 检查是否包含常见的分割点
+            split_patterns = [
+                # 中文标点
+                '，', '。', '；', '：', '！', '？', '、',
+                # 英文标点
+                ',', '.', ';', ':', '!', '?',
+                # 连词
+                ' and ', ' but ', ' or ', ' so ', ' yet ', ' for ', ' nor ',
+                ' 和 ', ' 但是 ', ' 或者 ', ' 所以 ', ' 然而 ', ' 因为 ',
+                # 其他可能的分割点
+                ' that ', ' which ', ' who ', ' when ', ' where ', ' why ', ' how ',
+                ' 的 ', ' 在 ', ' 是 ', ' 有 ', ' 会 ', ' 能 ', ' 要 '
+            ]
+            
+            # 寻找最佳分割点（尽量在中间位置）
+            best_split_pos = len(processed_content) // 2
+            min_distance = float('inf')
+            
+            for pattern in split_patterns:
+                if pattern in processed_content:
+                    # 找到所有匹配位置
+                    pos = processed_content.find(pattern)
+                    while pos != -1:
+                        # 计算与中间位置的距离
+                        distance = abs(pos - len(processed_content) // 2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            best_split_pos = pos + len(pattern)
+                        pos = processed_content.find(pattern, pos + 1)
+            
+            # 如果找到了合适的分割点，进行分割
+            if min_distance < float('inf') and best_split_pos > 10 and best_split_pos < len(processed_content) - 10:
+                part1 = processed_content[:best_split_pos].strip()
+                part2 = processed_content[best_split_pos:].strip()
+                processed_content = f"{part1}[br]{part2}"
+                console.print(f"[green]智能分割成功: 在位置 {best_split_pos} 处分割[/green]")
+                has_valid_split = True
+            else:
+                # 如果无法智能分割，则按长度平均分割
+                mid_point = len(processed_content) // 2
+                # 寻找最近的空格进行分割
+                space_before = processed_content.rfind(' ', 0, mid_point)
+                space_after = processed_content.find(' ', mid_point)
+                
+                if space_before != -1 and (space_after == -1 or mid_point - space_before <= space_after - mid_point):
+                    split_pos = space_before + 1
+                elif space_after != -1:
+                    split_pos = space_after
+                else:
+                    split_pos = mid_point
+                
+                if split_pos > 5 and split_pos < len(processed_content) - 5:
+                    part1 = processed_content[:split_pos].strip()
+                    part2 = processed_content[split_pos:].strip()
+                    processed_content = f"{part1}[br]{part2}"
+                    console.print(f"[yellow]按长度平均分割: 在位置 {split_pos} 处分割[/yellow]")
+                    has_valid_split = True
+                else:
+                    console.print(f"[yellow]内容太短，无需分割，保持原样[/yellow]")
+                    has_valid_split = True
+            
+            response_data[split_key] = processed_content
         
         # 最终验证：确保处理后的内容不为空
         final_content = response_data[split_key]
         if not final_content or final_content.strip() == "":
-            console.print(f"[red]Error: 处理后的内容为空[/red]")
-            return {"status": "error", "message": "Split failed, processed content is empty"}
+            console.print(f"[red]Error: 处理后的内容为空，使用原始句子[/red]")
+            # 作为最后的容错措施，使用原始句子
+            response_data[split_key] = original_sentence
+            final_content = original_sentence
         
-        # 如果内容中没有[br]标记，但有其他有效内容，也认为是成功的
-        if '[br]' not in final_content:
-            console.print(f"[yellow]Warning: 最终内容中没有[br]标记，但内容有效: {repr(final_content[:100])}...[/yellow]")
-            # 不返回错误，继续处理
+        # 验证分割结果的合理性
+        if '[br]' in final_content:
+            parts = final_content.split('[br]')
+            # 检查分割后的部分是否合理
+            valid_parts = [part.strip() for part in parts if part.strip()]
+            if len(valid_parts) < 2:
+                console.print(f"[yellow]Warning: 分割后只有 {len(valid_parts)} 个有效部分，可能分割不理想[/yellow]")
+            elif any(len(part.strip()) < 3 for part in valid_parts):
+                console.print(f"[yellow]Warning: 某些分割部分过短，可能影响字幕质量[/yellow]")
+            else:
+                console.print(f"[green]分割验证通过: 共 {len(valid_parts)} 个部分[/green]")
+        else:
+            console.print(f"[yellow]Warning: 最终内容中没有[br]标记，将作为单个部分处理: {repr(final_content[:50])}...[/yellow]")
         
-        console.print(f"[green]Success: 验证通过，找到有效的分割标记[/green]")
+        console.print(f"[green]Success: 验证通过，内容处理完成[/green]")
         return {"status": "success", "message": "Split completed"}
     
     response_data = ask_gpt(split_prompt + " " * retry_attempt, resp_type='json', valid_def=valid_split, log_title='split_by_meaning')
-    choice = response_data["choice"]
-    best_split = response_data[f"split{choice}"]
+    
+    # 安全获取choice和对应的split内容
+    choice = response_data.get("choice", "1")  # 默认使用1
+    
+    # 查找实际可用的split字段
+    available_split_keys = [k for k in response_data.keys() if k.startswith('split') and k != 'split']
+    
+    if f"split{choice}" in response_data:
+        best_split = response_data[f"split{choice}"]
+    elif available_split_keys:
+        # 使用第一个可用的split字段
+        best_split = response_data[available_split_keys[0]]
+        console.print(f"[yellow]使用备用split字段: {available_split_keys[0]}[/yellow]")
+    else:
+        console.print(f"[red]Error: 无法找到任何split内容，使用原始句子[/red]")
+        return sentence
+    
+    # 检查best_split是否有效
+    if not best_split or not isinstance(best_split, str):
+        console.print(f"[red]Error: split内容无效，使用原始句子[/red]")
+        return sentence
+    
     split_points = find_split_positions(sentence, best_split)
     # split the sentence based on the split points
     for i, split_point in enumerate(split_points):

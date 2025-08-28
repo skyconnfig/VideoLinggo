@@ -132,6 +132,13 @@ min_subtitle_duration: 2.5 # Minimum subtitle duration, will be forcibly extende
 min_trim_duration: 3.5 # Subtitles shorter than this value won't be split
 tolerance: 1.5 # Allowed extension time to the next subtitle
 
+# *Audio chunk time tolerance settings
+audio_chunk:
+  # Maximum allowed time exceeding for audio chunks (in seconds)
+  time_tolerance: 10.0
+  # Minimum time tolerance before truncation (in seconds)
+  min_tolerance: 0.6
+
 
 
 

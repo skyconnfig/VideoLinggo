@@ -233,27 +233,123 @@ def merge_chunks(tasks_df: pd.DataFrame) -> pd.DataFrame:
             # 🔄 Step5: Check if the last row exceeds the range
             if cur_time > chunk_end_time:
                 time_diff = cur_time - chunk_end_time
-                if time_diff <= 0.6:  # If exceeding time is within 0.6 seconds, truncate the last audio
-                    rprint(f"[yellow]⚠️ Chunk {chunk_start} to {index} exceeds by {time_diff:.3f}s, truncating last audio[/yellow]")
-                    # Get the last audio file
-                    last_number = tasks_df.iloc[index]['number']
-                    last_lines = eval(tasks_df.iloc[index]['lines']) if isinstance(tasks_df.iloc[index]['lines'], str) else tasks_df.iloc[index]['lines']
-                    last_line_index = len(last_lines) - 1
-                    last_file = OUTPUT_FILE_TEMPLATE.format(f"{last_number}_{last_line_index}")
+                
+                # 从配置文件读取时间容忍度设置
+                try:
+                    max_tolerance = load_key("audio_chunk.time_tolerance")
+                except (KeyError, Exception):
+                    max_tolerance = 10.0  # 默认值
+                
+                try:
+                    min_tolerance = load_key("audio_chunk.min_tolerance")
+                except (KeyError, Exception):
+                    min_tolerance = 0.6  # 默认值
+                
+                rprint(f"[yellow]⚠️ Chunk {chunk_start} to {index} exceeds by {time_diff:.3f}s (max tolerance: {max_tolerance}s)[/yellow]")
+                
+                if time_diff <= max_tolerance:  # 使用配置的最大容忍度
+                    rprint(f"[cyan]🔧 Time difference {time_diff:.3f}s is within tolerance, attempting audio truncation...[/cyan]")
                     
-                    # Calculate the duration to keep
-                    audio = AudioSegment.from_wav(last_file)
-                    original_duration = len(audio) / 1000  # Convert to seconds
-                    new_duration = original_duration - time_diff
-                    trimmed_audio = audio[:(new_duration * 1000)]  # pydub uses milliseconds
-                    trimmed_audio.export(last_file, format="wav")
+                    # 智能音频截断：从最后一个音频开始，逐步截断直到时间符合要求
+                    remaining_time_diff = time_diff
+                    truncated_files = []
                     
-                    # Update the last timestamp
-                    last_times = tasks_df.at[index, 'new_sub_times']
-                    last_times[-1][1] = chunk_end_time
-                    tasks_df.at[index, 'new_sub_times'] = last_times
+                    # 获取当前chunk的所有音频文件（从后往前处理）
+                    chunk_audio_files = []
+                    for chunk_idx in range(chunk_start, index + 1):
+                        chunk_row = tasks_df.iloc[chunk_idx]
+                        chunk_number = chunk_row['number']
+                        chunk_lines = eval(chunk_row['lines']) if isinstance(chunk_row['lines'], str) else chunk_row['lines']
+                        for line_idx in range(len(chunk_lines)):
+                            audio_file = OUTPUT_FILE_TEMPLATE.format(f"{chunk_number}_{line_idx}")
+                            chunk_audio_files.append((chunk_idx, chunk_number, line_idx, audio_file))
+                    
+                    # 从最后一个音频文件开始截断
+                    for chunk_idx, chunk_number, line_idx, audio_file in reversed(chunk_audio_files):
+                        if remaining_time_diff <= 0.01:  # 精度阈值
+                            break
+                            
+                        try:
+                            audio = AudioSegment.from_wav(audio_file)
+                            original_duration = len(audio) / 1000  # Convert to seconds
+                            
+                            if original_duration > remaining_time_diff:
+                                # 截断这个音频文件
+                                new_duration = original_duration - remaining_time_diff
+                                if new_duration > 0.1:  # 确保截断后的音频不会太短
+                                    trimmed_audio = audio[:(new_duration * 1000)]  # pydub uses milliseconds
+                                    trimmed_audio.export(audio_file, format="wav")
+                                    truncated_files.append((audio_file, remaining_time_diff))
+                                    
+                                    # 更新对应的时间戳
+                                    if chunk_idx == index:  # 如果是最后一行
+                                        last_times = tasks_df.at[chunk_idx, 'new_sub_times']
+                                        if last_times and line_idx < len(last_times):
+                                            last_times[line_idx][1] -= remaining_time_diff
+                                            tasks_df.at[chunk_idx, 'new_sub_times'] = last_times
+                                    
+                                    rprint(f"[green]✅ Truncated {audio_file} by {remaining_time_diff:.3f}s[/green]")
+                                    remaining_time_diff = 0
+                                    break
+                                else:
+                                    # 如果截断后太短，删除整个音频文件
+                                    remaining_time_diff -= original_duration
+                                    truncated_files.append((audio_file, original_duration))
+                                    # 创建一个很短的静音文件替代
+                                    silent_audio = AudioSegment.silent(duration=100)  # 0.1秒静音
+                                    silent_audio.export(audio_file, format="wav")
+                                    rprint(f"[yellow]⚠️ Replaced {audio_file} with silence (original: {original_duration:.3f}s)[/yellow]")
+                            else:
+                                # 整个音频文件都需要被移除的时间覆盖
+                                remaining_time_diff -= original_duration
+                                truncated_files.append((audio_file, original_duration))
+                                # 创建一个很短的静音文件替代
+                                silent_audio = AudioSegment.silent(duration=100)  # 0.1秒静音
+                                silent_audio.export(audio_file, format="wav")
+                                rprint(f"[yellow]⚠️ Replaced {audio_file} with silence (removed: {original_duration:.3f}s)[/yellow]")
+                                
+                        except Exception as audio_error:
+                            rprint(f"[red]❌ Error processing {audio_file}: {str(audio_error)}[/red]")
+                            continue
+                    
+                    if truncated_files:
+                        total_truncated = sum(duration for _, duration in truncated_files)
+                        rprint(f"[green]✅ Successfully truncated {len(truncated_files)} audio files, total time reduced: {total_truncated:.3f}s[/green]")
+                    
+                    # 最终验证：重新计算当前时间
+                    final_cur_time = chunk_start_time
+                    for i, row in chunk_df.iterrows():
+                        if i != 0 and keep_gaps:
+                            final_cur_time += chunk_df.iloc[i-1]['gap']/speed_factor
+                        number = row['number']
+                        lines = eval(row['lines']) if isinstance(row['lines'], str) else row['lines']
+                        for line_index, line in enumerate(lines):
+                            output_file = OUTPUT_FILE_TEMPLATE.format(f"{number}_{line_index}")
+                            try:
+                                ad_dur = get_audio_duration(output_file)
+                                final_cur_time += ad_dur
+                            except:
+                                rprint(f"[yellow]⚠️ Could not get duration for {output_file}, using estimated duration[/yellow]")
+                                final_cur_time += 1.0  # 默认1秒
+                    
+                    if final_cur_time <= chunk_end_time + 0.1:  # 允许0.1秒的精度误差
+                        rprint(f"[green]✅ Time adjustment successful: {final_cur_time:.3f}s <= {chunk_end_time:.3f}s[/green]")
+                    else:
+                        rprint(f"[yellow]⚠️ Time still exceeds after truncation: {final_cur_time:.3f}s > {chunk_end_time:.3f}s[/yellow]")
+                        rprint(f"[yellow]   Remaining difference: {final_cur_time - chunk_end_time:.3f}s (acceptable if < {max_tolerance}s)[/yellow]")
+                        
                 else:
-                    raise Exception(f"Chunk {chunk_start} to {index} exceeds the chunk end time {chunk_end_time:.2f} seconds with current time {cur_time:.2f} seconds")
+                    # 超出最大容忍度，提供详细的错误信息和建议
+                    rprint(f"[red]❌ Chunk {chunk_start} to {index} exceeds maximum time tolerance[/red]")
+                    rprint(f"[red]   Expected end time: {chunk_end_time:.2f}s[/red]")
+                    rprint(f"[red]   Actual end time: {cur_time:.2f}s[/red]")
+                    rprint(f"[red]   Time difference: {time_diff:.2f}s[/red]")
+                    rprint(f"[red]   Maximum tolerance: {max_tolerance:.2f}s[/red]")
+                    rprint(f"[yellow]💡 Suggestions:[/yellow]")
+                    rprint(f"[yellow]   1. Increase 'audio_chunk.time_tolerance' in config.yaml[/yellow]")
+                    rprint(f"[yellow]   2. Adjust speed_factor settings to reduce audio duration[/yellow]")
+                    rprint(f"[yellow]   3. Check if TTS is generating audio longer than expected[/yellow]")
+                    raise Exception(f"Chunk {chunk_start} to {index} exceeds the maximum time tolerance {max_tolerance:.2f}s with time difference {time_diff:.2f}s")
             chunk_start = index+1
     
     rprint("[bold green]✅ Audio chunks processing completed![/bold green]")

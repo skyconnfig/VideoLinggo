@@ -1,6 +1,7 @@
 import datetime
 import re
 import pandas as pd
+from difflib import SequenceMatcher
 from core._8_1_audio_task import time_diff_seconds
 from core.asr_backend.audio_preprocess import get_audio_duration
 from core.tts_backend.estimate_duration import init_estimator, estimate_duration
@@ -168,35 +169,130 @@ def gen_dub_chunks():
     df['src_lines'] = None
     last_idx = 0
 
-    def clean_text(text):
-        """clean space and punctuation"""
+    def clean_text(text, level='strict'):
+        """Clean text with different levels of strictness"""
         if not text or not isinstance(text, str):
             return ''
-        return re.sub(r'[^\w\s]|[\s]', '', text)
-
-    for idx, row in df.iterrows():
-        target = clean_text(row['text'])
-        matches = []
-        current = ''
-        match_indices = []  # Store indices for matching lines
         
-        for i in range(last_idx, len(content_lines)):
-            line = content_lines[i]
-            cleaned_line = clean_text(line)
-            current += cleaned_line
-            matches.append(line)  # 存储原始文本
-            match_indices.append(i)
+        if level == 'strict':
+            # 移除所有标点和空格
+            return re.sub(r'[^\w\s]|[\s]', '', text)
+        elif level == 'moderate':
+            # 只移除标点，保留空格
+            return re.sub(r'[^\w\s]', '', text).strip()
+        elif level == 'loose':
+            # 只移除多余空格
+            return re.sub(r'\s+', ' ', text).strip()
+        else:
+            return text.strip()
+    
+    def calculate_similarity(text1, text2):
+        """Calculate similarity between two texts"""
+        return SequenceMatcher(None, text1, text2).ratio()
+    
+    def fuzzy_match(target, candidates, threshold=0.8):
+        """Find best fuzzy match from candidates"""
+        best_match = None
+        best_score = 0
+        best_index = -1
+        
+        for i, candidate in enumerate(candidates):
+            score = calculate_similarity(target, candidate)
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = candidate
+                best_index = i
+        
+        return best_match, best_score, best_index
+    
+    def try_multiple_match_strategies(target_text, content_lines, ori_content_lines, start_idx):
+        """Try multiple matching strategies with increasing tolerance"""
+        strategies = [
+            ('strict', 1.0),      # 完全匹配
+            ('moderate', 0.95),   # 高相似度匹配
+            ('loose', 0.85),      # 中等相似度匹配
+            ('fuzzy', 0.7)        # 模糊匹配
+        ]
+        
+        for strategy, threshold in strategies:
+            rprint(f"[🔍 Trying] {strategy} matching with threshold {threshold}")
             
-            if current == target:
-                df.at[idx, 'lines'] = matches
-                df.at[idx, 'src_lines'] = [ori_content_lines[i] for i in match_indices]
-                last_idx = i + 1
-                break
-        else:  # If no match is found
-            rprint(f"[❌ Error] Matching failed at line {idx}:")
-            rprint(f"Target: '{target}'")
-            rprint(f"Current: '{current}'")
-            raise ValueError("Matching failed")
+            matches = []
+            current = ''
+            match_indices = []
+            
+            for i in range(start_idx, len(content_lines)):
+                line = content_lines[i]
+                cleaned_line = clean_text(line, 'moderate' if strategy == 'fuzzy' else strategy)
+                current += cleaned_line
+                matches.append(line)
+                match_indices.append(i)
+                
+                # 计算相似度
+                similarity = calculate_similarity(clean_text(target_text, 'moderate' if strategy == 'fuzzy' else strategy), current)
+                
+                if similarity >= threshold:
+                    rprint(f"[✅ Success] {strategy} match found with similarity {similarity:.3f}")
+                    return matches, [ori_content_lines[j] for j in match_indices], i + 1, similarity
+                
+                # 如果累积了太多行还没匹配，尝试下一个策略
+                if len(matches) > 10:
+                    break
+        
+        return None, None, start_idx, 0.0
+
+    # 添加匹配统计
+    total_matches = 0
+    successful_matches = 0
+    match_strategies_used = {'strict': 0, 'moderate': 0, 'loose': 0, 'fuzzy': 0}
+    
+    for idx, row in df.iterrows():
+        target_text = row['text']
+        total_matches += 1
+        
+        rprint(f"[🎯 Matching] Processing line {idx}: '{target_text[:50]}...'") 
+        
+        # 尝试多种匹配策略
+        matches, src_matches, new_last_idx, similarity = try_multiple_match_strategies(
+            target_text, content_lines, ori_content_lines, last_idx
+        )
+        
+        if matches is not None:
+            df.at[idx, 'lines'] = matches
+            df.at[idx, 'src_lines'] = src_matches
+            last_idx = new_last_idx
+            successful_matches += 1
+            
+            # 记录使用的策略
+            if similarity == 1.0:
+                match_strategies_used['strict'] += 1
+            elif similarity >= 0.95:
+                match_strategies_used['moderate'] += 1
+            elif similarity >= 0.85:
+                match_strategies_used['loose'] += 1
+            else:
+                match_strategies_used['fuzzy'] += 1
+                
+            rprint(f"[✅ Success] Line {idx} matched with similarity {similarity:.3f}")
+        else:
+            # 最后的容错处理：跳过这一行并使用空匹配
+            rprint(f"[⚠️ Warning] No suitable match found for line {idx}, using fallback")
+            rprint(f"Target text: '{target_text}'")
+            
+            # 提供回退选项
+            fallback_matches = [target_text]  # 使用原文本作为回退
+            fallback_src = [target_text]      # 源文本也使用原文本
+            
+            df.at[idx, 'lines'] = fallback_matches
+            df.at[idx, 'src_lines'] = fallback_src
+            
+            # 不更新last_idx，继续从当前位置匹配
+            rprint(f"[🔄 Fallback] Using original text as fallback for line {idx}")
+    
+    # 输出匹配统计
+    success_rate = (successful_matches / total_matches) * 100 if total_matches > 0 else 0
+    rprint(f"[📊 Statistics] Matching completed: {successful_matches}/{total_matches} ({success_rate:.1f}% success rate)")
+    rprint(f"[📈 Strategies] Used: Strict={match_strategies_used['strict']}, Moderate={match_strategies_used['moderate']}, Loose={match_strategies_used['loose']}, Fuzzy={match_strategies_used['fuzzy']}")
 
     # Save results
     df.to_excel(_8_1_AUDIO_TASK, index=False)
